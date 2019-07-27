@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: 337f1f021d4d5f154b04e7d48c7b072f9b013140815de00724022729f6adf5a5
+-- hash: 7382f1b40cb4b3f4cf5eeab11e1a9652e3e78b9408ef738daeb2f3735fe0fcab
 
 name:           ultraquery
 version:        0.1.0.0
@@ -28,17 +28,20 @@ source-repository head
 library
   exposed-modules:
       Lib
+      Lib.Parser
   other-modules:
       Paths_ultraquery
   hs-source-dirs:
       src
-  default-extensions: DataKinds TypeOperators MultiParamTypeClasses DeriveGeneric FlexibleContexts FlexibleInstances LambdaCase ScopedTypeVariables GeneralizedNewtypeDeriving DerivingStrategies DeriveAnyClass TypeApplications DeriveFunctor DeriveFoldable TypeFamilies PolyKinds RankNTypes GADTs InstanceSigs NoMonomorphismRestriction EmptyCase QuantifiedConstraints TupleSections RecordWildCards DerivingVia MultiWayIf FunctionalDependencies ConstraintKinds DeriveTraversable BangPatterns DefaultSignatures StandaloneDeriving
+  default-extensions: DataKinds OverloadedStrings TypeOperators MultiParamTypeClasses DeriveGeneric FlexibleContexts FlexibleInstances LambdaCase ScopedTypeVariables GeneralizedNewtypeDeriving DerivingStrategies DeriveAnyClass TypeApplications DeriveFunctor DeriveFoldable TypeFamilies PolyKinds RankNTypes GADTs InstanceSigs NoMonomorphismRestriction EmptyCase QuantifiedConstraints TupleSections RecordWildCards DerivingVia MultiWayIf FunctionalDependencies ConstraintKinds DeriveTraversable BangPatterns DefaultSignatures StandaloneDeriving
   ghc-options: -Wall
   build-depends:
-      base >=4.7 && <5
+      attoparsec
+    , base >=4.7 && <5
     , capability
     , containers
     , mtl
+    , text
     , transformers
   default-language: Haskell2010
 
@@ -48,10 +51,11 @@ executable ultraquery-exe
       Paths_ultraquery
   hs-source-dirs:
       app
-  default-extensions: DataKinds TypeOperators MultiParamTypeClasses DeriveGeneric FlexibleContexts FlexibleInstances LambdaCase ScopedTypeVariables GeneralizedNewtypeDeriving DerivingStrategies DeriveAnyClass TypeApplications DeriveFunctor DeriveFoldable TypeFamilies PolyKinds RankNTypes GADTs InstanceSigs NoMonomorphismRestriction EmptyCase QuantifiedConstraints TupleSections RecordWildCards DerivingVia MultiWayIf FunctionalDependencies ConstraintKinds DeriveTraversable BangPatterns DefaultSignatures StandaloneDeriving
+  default-extensions: DataKinds OverloadedStrings TypeOperators MultiParamTypeClasses DeriveGeneric FlexibleContexts FlexibleInstances LambdaCase ScopedTypeVariables GeneralizedNewtypeDeriving DerivingStrategies DeriveAnyClass TypeApplications DeriveFunctor DeriveFoldable TypeFamilies PolyKinds RankNTypes GADTs InstanceSigs NoMonomorphismRestriction EmptyCase QuantifiedConstraints TupleSections RecordWildCards DerivingVia MultiWayIf FunctionalDependencies ConstraintKinds DeriveTraversable BangPatterns DefaultSignatures StandaloneDeriving
   ghc-options: -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       base >=4.7 && <5
+    , text
     , ultraquery
   default-language: Haskell2010
 
@@ -62,7 +66,7 @@ test-suite ultraquery-test
       Paths_ultraquery
   hs-source-dirs:
       test
-  default-extensions: DataKinds TypeOperators MultiParamTypeClasses DeriveGeneric FlexibleContexts FlexibleInstances LambdaCase ScopedTypeVariables GeneralizedNewtypeDeriving DerivingStrategies DeriveAnyClass TypeApplications DeriveFunctor DeriveFoldable TypeFamilies PolyKinds RankNTypes GADTs InstanceSigs NoMonomorphismRestriction EmptyCase QuantifiedConstraints TupleSections RecordWildCards DerivingVia MultiWayIf FunctionalDependencies ConstraintKinds DeriveTraversable BangPatterns DefaultSignatures StandaloneDeriving
+  default-extensions: DataKinds OverloadedStrings TypeOperators MultiParamTypeClasses DeriveGeneric FlexibleContexts FlexibleInstances LambdaCase ScopedTypeVariables GeneralizedNewtypeDeriving DerivingStrategies DeriveAnyClass TypeApplications DeriveFunctor DeriveFoldable TypeFamilies PolyKinds RankNTypes GADTs InstanceSigs NoMonomorphismRestriction EmptyCase QuantifiedConstraints TupleSections RecordWildCards DerivingVia MultiWayIf FunctionalDependencies ConstraintKinds DeriveTraversable BangPatterns DefaultSignatures StandaloneDeriving
   ghc-options: -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       base >=4.7 && <5

@@ -21,6 +21,7 @@ description:         Please see the README on GitHub at <https://github.com/gith
 
 default-extensions:
 - DataKinds
+- OverloadedStrings
 - TypeOperators
 - MultiParamTypeClasses
 - DeriveGeneric
@@ -64,6 +65,8 @@ library:
   - transformers
   - mtl
   - capability
+  - attoparsec
+  - text
   ghc-options:
   # - -O2
   - -Wall
@@ -79,6 +82,7 @@ executables:
     - -with-rtsopts=-N
     dependencies:
     - ultraquery
+    - text
 
 tests:
   ultraquery-test:

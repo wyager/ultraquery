@@ -24,7 +24,8 @@ someFunc = putStrLn "someFunc"
 
 data Query finite var   
     = Member var finite
-    | Exists var (Query finite var )
+    | Exists var (Query finite var)
+    | And (Query finite var) (Query finite var)
     deriving Show
 
 data RenameState old new = RenameState {
@@ -87,6 +88,8 @@ uniqify (Member var finite) = (`Member` finite) <$> rename var
 uniqify (Exists var q) = do
     (q', new) <- withName var (uniqify q)
     return (Exists new q')
+uniqify (And q1 q2) = And <$> uniqify q1 <*> uniqify q2
+
 
 
 
@@ -95,8 +98,6 @@ uniqify (Exists var q) = do
 data Type = TInt | TFloat
     deriving (Eq, Ord, Show)
 
--- data Judgement = Is Type
---     deriving (Eq, Ord)
 
 data Judgements = Judgements {
         finite :: Bool, -- Should probably keep a proof here
@@ -106,16 +107,16 @@ data Judgements = Judgements {
 defaultJudgements :: Judgements
 defaultJudgements = Judgements False Nothing
 
-data TypeError = UnificationFailure Type Type deriving Show
+data TypeError tag = UnificationFailure Type Type tag deriving Show
 
-unifyMaybe :: Maybe Type -> Maybe Type -> Either TypeError (Maybe Type)
-unifyMaybe Nothing a = Right a
-unifyMaybe (Just x) Nothing = Right (Just x)
-unifyMaybe (Just x) (Just y) = if x == y then Right (Just x) else Left (UnificationFailure x y)
+unifyMaybe :: tag -> Maybe Type -> Maybe Type -> Either (TypeError tag) (Maybe Type)
+unifyMaybe _ Nothing a = Right a
+unifyMaybe _ (Just x) Nothing = Right (Just x)
+unifyMaybe t (Just x) (Just y) = if x == y then Right (Just x) else Left (UnificationFailure x y t)
 
 instance TypeSystem Judgements where
     type ErrorIn Judgements = TypeError
-    unify (Judgements f1 i1) (Judgements f2 i2) = (Judgements (f1 || f2)) <$> unifyMaybe i1 i2
+    unify tag (Judgements f1 i1) (Judgements f2 i2) = (Judgements (f1 || f2)) <$> unifyMaybe tag i1 i2
 
 data TCContext var judgements = TCContext 
     { judgements :: Map var judgements
@@ -128,7 +129,7 @@ emptyTCContext = TCContext Map.empty
 
 type MonadTypecheck var judgements m = 
     (HasState "judgements" (Map var judgements) m, 
-     HasThrow "type" (ErrorIn judgements) m)
+     HasThrow "type" (ErrorIn judgements var) m)
 
 
 newtype TypecheckT var judgements err m a = TypecheckT {getTypecheckT :: Except.ExceptT err (State.StateT (TCContext var judgements) m) a}
@@ -141,15 +142,15 @@ runTypecheckT :: TypecheckT var judgements err m a -> TCContext var judgements -
 runTypecheckT (TypecheckT tc) = State.runStateT (Except.runExceptT tc) 
 
 class TypeSystem judgements where
-    type ErrorIn judgements :: *
-    unify :: judgements -> judgements -> Either (ErrorIn judgements) judgements
+    type ErrorIn judgements :: * -> *
+    unify :: tag -> judgements -> judgements -> Either (ErrorIn judgements tag) judgements
 
 judge :: (TypeSystem judgements, MonadTypecheck var judgements m, Ord var) => var -> judgements -> m ()
 judge var newJudgements = do
     judgements <- Map.lookup var <$> CS.get @"judgements"
     case judgements of
         Nothing -> CS.modify' @"judgements" (Map.insert var newJudgements)
-        Just preexisting -> case unify preexisting newJudgements of
+        Just preexisting -> case unify var preexisting newJudgements of
             Right consistent -> CS.modify' @"judgements" (Map.insert var consistent)
             Left err -> CE.throw @"type" err
 
@@ -159,21 +160,22 @@ typecheck defaultJudgement inferredFrom = go
     where
     go (Member var finite) = judge var (inferredFrom finite)
     go (Exists var q) = judge var defaultJudgement >> go q
+    go (And q1 q2) = go q1 >> go q2
 
 
 data ExampleFinite 
-    = ExampleInt [Int]
-    | ExampleFloat [Float]
+    = EInt [Int]
+    | EFloat [Float]
     deriving Show
 
 
 exampleJudgements :: ExampleFinite -> Judgements
-exampleJudgements (ExampleInt _) = Judgements True (Just TInt)
-exampleJudgements (ExampleFloat _) = Judgements True (Just TFloat)
+exampleJudgements (EInt _) = Judgements True (Just TInt)
+exampleJudgements (EFloat _) = Judgements True (Just TFloat)
 
 
 
-process :: Query ExampleFinite String -> (Query ExampleFinite VarID, RenameState String VarID, Either TypeError (), TCContext VarID Judgements)
+process :: Ord name => Query ExampleFinite name -> (Query ExampleFinite VarID, RenameState name VarID, Either (TypeError VarID) (), TCContext VarID Judgements)
 process query = (renamed, renameState, typeResult, context)
     where
     (renamed, renameState) = runIdentity $ runRenameT (uniqify query) emptyRenameState
