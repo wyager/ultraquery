@@ -16,6 +16,7 @@ import   Capability.Error (HasThrow, MonadError)
 import   Capability.Reader (HasReader)
 import GHC.Generics (Generic)
 import Control.Monad.Identity (runIdentity)
+import Control.Applicative ((<|>))
 
 someFunc :: IO ()
 someFunc = putStrLn "someFunc"
@@ -65,20 +66,19 @@ withName old x = do
     CS.modify' @"backwards" (Map.insert new old)
     return (result, new)
 
+-- Causes all distinct variables to have unique names
 rename :: (Enum new, Ord new, Ord old, HasState "fresh" new m, Ord old, HasReader "bound" (Map old new) m, HasState "free" (Map old new) m, HasState "backwards" (Map new old) m) => old -> m new 
 rename old = do
     bounds <- CR.ask @"bound"
-    case Map.lookup old bounds of 
-        Just bound -> return bound
+    frees <- CS.get @"free"
+    -- Bound variables take precendence (this also takes care of shadowing)
+    case Map.lookup old bounds <|> Map.lookup old frees of 
+        Just known -> return known
         Nothing -> do
-            frees <- CS.get @"free"
-            case Map.lookup old frees of
-                Just free -> return free
-                Nothing -> do
-                    free <- mkFresh
-                    CS.modify' @"free" (Map.insert old free)
-                    CS.modify' @"backwards" (Map.insert free old)
-                    return free
+            new <- mkFresh
+            CS.modify' @"free" (Map.insert old new)
+            CS.modify' @"backwards" (Map.insert new old)
+            return new
 
 
 type MonadRename old new m = (HasState "fresh" new m, Ord old, HasReader "bound" (Map old new) m, HasState "free" (Map old new) m, HasState "backwards" (Map new old) m)
