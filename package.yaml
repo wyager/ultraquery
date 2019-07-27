@@ -1,0 +1,92 @@
+name:                ultraquery
+version:             0.1.0.0
+github:              "githubuser/ultraquery"
+license:             BSD3
+author:              "Author name here"
+maintainer:          "example@example.com"
+copyright:           "2019 Author name here"
+
+extra-source-files:
+- README.md
+- ChangeLog.md
+
+# Metadata used when publishing your package
+# synopsis:            Short description of your package
+# category:            Web
+
+# To avoid duplicated efforts in documentation and dealing with the
+# complications of embedding Haddock markup inside cabal files, it is
+# common to point users to the README.md file.
+description:         Please see the README on GitHub at <https://github.com/githubuser/ultraquery#readme>
+
+default-extensions:
+- DataKinds
+- TypeOperators
+- MultiParamTypeClasses
+- DeriveGeneric
+- FlexibleContexts
+- FlexibleInstances
+- LambdaCase
+- ScopedTypeVariables
+- GeneralizedNewtypeDeriving
+- DerivingStrategies
+- DeriveAnyClass
+- TypeApplications
+- DeriveFunctor
+- DeriveFoldable
+- TypeFamilies
+- PolyKinds
+- RankNTypes
+- GADTs
+- InstanceSigs
+- NoMonomorphismRestriction
+- EmptyCase
+- QuantifiedConstraints
+- TupleSections
+- RecordWildCards
+- DerivingVia
+- MultiWayIf
+- FunctionalDependencies
+- ConstraintKinds
+- DeriveTraversable
+- BangPatterns
+- DefaultSignatures
+- StandaloneDeriving
+
+dependencies:
+- base >= 4.7 && < 5
+
+library:
+  source-dirs: src
+  dependencies:
+  # - red-black-record
+  - containers
+  - transformers
+  - mtl
+  - capability
+  ghc-options:
+  # - -O2
+  - -Wall
+  # - -fexpose-all-unfoldings
+
+executables:
+  ultraquery-exe:
+    main:                Main.hs
+    source-dirs:         app
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - ultraquery
+
+tests:
+  ultraquery-test:
+    main:                Spec.hs
+    source-dirs:         test
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - ultraquery
