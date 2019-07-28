@@ -1,6 +1,6 @@
 module Lib.Parser where
 
-import Lib(Query(..), ExampleFinite(..))
+import Lib(Query(..), ExampleExtrinsic(..))
 
 import Data.Attoparsec.Text as A
 import Data.Text (Text)
@@ -11,7 +11,7 @@ import Control.Monad (guard)
 import Data.Foldable (asum)
 
 keywords :: Set Text
-keywords = fromList ["in", "∈", "∃", "exists", "and", "&", "∧"]
+keywords = fromList ["∃", "exists"]
 
 spacey :: Parser a -> Parser a
 spacey p = A.skipSpace *> p <* A.skipSpace
@@ -23,29 +23,33 @@ nonIdentifierCharacter c = isSpace c || c `member` punctuation
     where
     punctuation = fromList "()[]"
 
-query :: forall finite . Parser finite -> Parser (Query finite Text)
-query finite = spacey go 
+query :: forall extrinsic . Set Text -> Parser extrinsic -> Parser (Query extrinsic Text)
+query extrinsics extrinsic = spacey go 
     where
-    go = member_ <|> exists <|> and_ <|> parenthesized go
-    var = do
-        v <- takeTill nonIdentifierCharacter
-        guard $ not $ (v `member` keywords)
+    arg = spacey (extrinsic_ <|> var <|> exists <|> parenthesized go)
+    go = apply <|> arg 
+    var = Var <$> ident
+    extrinsic_ = Extrinsic <$> extrinsic
+    ident = do
+        v <- A.takeWhile1 (not . nonIdentifierCharacter)
+        guard $ not $ (v `member` keywords || v `member` extrinsics)
         return v
-    member_ = Member <$> var <* spacey lexeme <*> finite
-        where
-        lexeme = asum ["∈", "in"]
-    exists = lexeme *> (Exists <$> spacey var <*> go)
+    exists = lexeme *> (Exists <$> spacey ident <*> go)
         where
         lexeme = asum ["∃", "exists"]
-    and_ = (And <$> parenthesized go <* spacey lexeme <*> parenthesized go)
-        where
-        lexeme = asum ["and", "&", "∧"]
+    apply = Apply <$> spacey extrinsic <*> many arg
 
-exampleFinite :: Parser ExampleFinite
-exampleFinite = EInt <$> ints_ 
+
+exampleExtrinsics :: Set Text
+exampleExtrinsics = fromList ["in", "∈", "and", "&", "∧"]
+
+
+exampleExtrinsic :: Parser ExampleExtrinsic
+exampleExtrinsic = EInt <$> ints_ 
     where
     ints_ = A.char '[' *> many int_ <* A.char ']'
     int_ = spacey decimal <* option ',' (A.char ',')
 
-example :: Text -> Either String (Query ExampleFinite Text)
-example = parseOnly (query exampleFinite <* A.endOfInput)
+example :: Text -> Either String (Query ExampleExtrinsic Text)
+example = parseOnly (query exampleExtrinsics exampleExtrinsic <* A.endOfInput)
+

@@ -7,7 +7,7 @@ import Data.Map.Strict (Map)
 -- import Data.Set (Set)
 import qualified Control.Monad.State as State
 import qualified Control.Monad.Except as Except
-import           Capability.Accessors (Field, Lift)
+import           Capability.Accessors (Field, Lift, Rename)
 import qualified Capability.State as CS
 import qualified Capability.Reader as CR
 import qualified Capability.Error as CE
@@ -23,17 +23,18 @@ someFunc = putStrLn "someFunc"
 
 
 
-data Query finite var   
-    = Member var finite
-    | Exists var (Query finite var)
-    | And (Query finite var) (Query finite var)
+data Query ext var   
+    = Var var -- Constraint solver variables
+    | Extrinsic ext -- Constant terms, defined outside of the core language.
+    | Exists var (Query ext var)  -- Discharge a CSV
+    | Apply ext [Query ext var] -- Think about generalizing to (Apply (Query ext var) [Query ext var]). Do we want to allow CSVs to have function types?
     deriving Show
 
 data RenameState old new = RenameState {
         free :: Map old new, -- Free variables
         bound :: Map old new, -- Bound variables 
         backwards :: Map new old, -- Backwards lookup, for error reporting
-        fresh :: new -- A source of fresh new variables
+        freshNew :: new -- A source of fresh new variables
     } deriving (Generic, Show)
 
 emptyRenameState :: Enum new => RenameState old new
@@ -44,13 +45,15 @@ newtype RenameT old new m a = RenameT {getRenameT :: State.StateT (RenameState o
     deriving (HasState "free" (Map old new)) via (Field "free" () (MonadState (State.StateT (RenameState old new) m)))
     deriving (HasReader "bound" (Map old new)) via (CR.ReadStatePure (Field "bound" () (MonadState (State.StateT (RenameState old new) m))))
     deriving (HasState "backwards" (Map new old)) via (Field "backwards" () (MonadState (State.StateT (RenameState old new) m)))
-    deriving (HasState "fresh" new) via (Field "fresh" () (MonadState (State.StateT (RenameState old new) m)))
+    deriving (HasState "fresh" new) via (Rename "freshNew" (Field "freshNew" () (MonadState (State.StateT (RenameState old new) m))))
 
 
 newtype VarID = VarID Int deriving (Eq, Ord, Enum)
 instance Show VarID where
     show (VarID i) = "<" ++ show i ++ ">"
-
+newtype TVarID = TVarID Int deriving (Eq, Ord, Enum)
+instance Show TVarID where
+    show (TVarID i) = "{" ++ show i ++ "}"
 
 runRenameT :: RenameT old new m a -> RenameState old new -> m (a, RenameState old new)
 runRenameT = State.runStateT . getRenameT
@@ -84,11 +87,12 @@ rename old = do
 type MonadRename old new m = (HasState "fresh" new m, Ord old, HasReader "bound" (Map old new) m, HasState "free" (Map old new) m, HasState "backwards" (Map new old) m)
 
 uniqify :: (Enum new, Ord new, Ord old, MonadRename old new m) => Query finite old -> m (Query finite new)
-uniqify (Member var finite) = (`Member` finite) <$> rename var
+uniqify (Var var) = Var <$> rename var
+uniqify (Extrinsic ext) = return (Extrinsic ext)
 uniqify (Exists var q) = do
     (q', new) <- withName var (uniqify q)
     return (Exists new q')
-uniqify (And q1 q2) = And <$> uniqify q1 <*> uniqify q2
+uniqify (Apply ext qs) = Apply ext <$> traverse uniqify qs
 
 
 
@@ -97,59 +101,111 @@ data Type = TInt | TFloat
     deriving (Eq, Ord, Show)
 
 
-data Judgements = Judgements {
+data ExampleJudgements = ExampleJudgements {
         finite :: Bool, -- Should probably keep a proof here
         is :: Maybe Type
     } deriving Show
 
-defaultJudgements :: Judgements
-defaultJudgements = Judgements False Nothing
 
-data TypeError tag = UnificationFailure Type Type tag deriving Show
+data The x = The x
 
-unifyMaybe :: tag -> Maybe Type -> Maybe Type -> Either (TypeError tag) (Maybe Type)
+
+newtype ExampleJ tag a = ExampleJ (Except.Except (ErrorIn ExampleJudgements tag) a)
+    deriving newtype (Functor, Applicative, Monad)
+
+exampleJudge :: Judge ExampleJ ExampleJudgements ExampleExtrinsic
+exampleJudge = Judge {jDefault = jDefault, jExtrinsic = jExtrinsic, jApply = jApply, jRun = jRun}
+    where
+    jDefault = ExampleJudgements False Nothing
+    jExtrinsic (EInt _) = ExampleJudgements {finite = True, is = Just TInt}
+    jExtrinsic (EFloat _) = ExampleJudgements {finite = True, is = Just TFloat}
+    jApply tag = ExampleJ $ Except.throwError (Function tag)
+    jRun ext (ExampleJ e) = (jExtrinsic ext,) <$> Except.runExcept e
+
+
+data ExampleExtrinsic 
+    = EInt [Int]
+    | EFloat [Float]
+    deriving Show
+
+
+exampleJudgements :: ExampleExtrinsic -> ExampleJudgements
+exampleJudgements (EInt _) = ExampleJudgements True (Just TInt)
+exampleJudgements (EFloat _) = ExampleJudgements True (Just TFloat)
+
+
+data Judge j judgements extrinsic = Judge {
+        jDefault :: judgements, 
+        jExtrinsic :: extrinsic -> judgements,
+        jApply :: forall tag . tag -> j tag judgements, -- Used to generate judgements over the list of things
+        jRun :: forall a t . extrinsic -> j t a -> Either (ErrorIn judgements t) (judgements, a)
+    }
+
+data ExampleTypeError tag = UnificationFailure Type Type tag | Function tag deriving (Show, Functor)
+
+unifyMaybe :: tag -> Maybe Type -> Maybe Type -> Either (ExampleTypeError tag) (Maybe Type)
 unifyMaybe _ Nothing a = Right a
 unifyMaybe _ (Just x) Nothing = Right (Just x)
 unifyMaybe t (Just x) (Just y) = if x == y then Right (Just x) else Left (UnificationFailure x y t)
 
-instance TypeSystem Judgements where
-    type ErrorIn Judgements = TypeError
-    unify tag (Judgements f1 i1) (Judgements f2 i2) = (Judgements (f1 || f2)) <$> unifyMaybe tag i1 i2
+instance TypeSystem ExampleJudgements where
+    type ErrorIn ExampleJudgements = ExampleTypeError
+    unify tag (ExampleJudgements f1 i1) (ExampleJudgements f2 i2) = (ExampleJudgements (f1 || f2)) <$> unifyMaybe tag i1 i2
 
-data TCContext var judgements = TCContext 
-    { judgements :: Map var judgements
+data TCContext tvar var judgements = TCContext 
+    { direct :: Map var tvar
+    , judgements :: Map tvar judgements
+    , freshTV :: tvar
     } deriving (Generic, Show)
 
-emptyTCContext :: TCContext var judgements
-emptyTCContext = TCContext Map.empty
+emptyTCContext :: Enum tvar => TCContext tvar var judgements
+emptyTCContext = TCContext Map.empty Map.empty (toEnum 0)
 
 -- newtype TypecheckT 
 
-type MonadTypecheck var judgements m = 
-    (HasState "judgements" (Map var judgements) m, 
-     HasThrow "type" (ErrorIn judgements var) m)
+type MonadTypecheck tvar var judgements m = 
+    (HasState "direct" (Map var tvar) m,
+     HasState "judgements" (Map tvar judgements) m, 
+     HasState "fresh" tvar m,
+     HasThrow "type" (ErrorIn judgements tvar) m)
 
 
-newtype TypecheckT var judgements err m a = TypecheckT {getTypecheckT :: Except.ExceptT err (State.StateT (TCContext var judgements) m) a}
+newtype TypecheckT tvar var judgements err m a = TypecheckT {getTypecheckT :: Except.ExceptT err (State.StateT (TCContext tvar var judgements) m) a}
     deriving newtype (Functor, Applicative, Monad)
-    deriving (HasState "judgements" (Map var judgements)) via ((Lift (Except.ExceptT err (Field "judgements" () (MonadState (State.StateT (TCContext var judgements) m))))))
-    deriving (HasThrow "type" err) via (MonadError (Except.ExceptT err (State.StateT (TCContext var judgements) m)))
+    deriving (HasState "direct" (Map var tvar)) via ((Lift (Except.ExceptT err (Field "direct" () (MonadState (State.StateT (TCContext tvar var judgements) m))))))
+    deriving (HasState "judgements" (Map tvar judgements)) via ((Lift (Except.ExceptT err (Field "judgements" () (MonadState (State.StateT (TCContext tvar var judgements) m))))))
+    deriving (HasState "fresh" tvar) via ((Lift (Except.ExceptT err (Rename "freshTV" (Field "freshTV" () (MonadState (State.StateT (TCContext tvar var judgements) m)))))))
+    deriving (HasThrow "type" err) via (MonadError (Except.ExceptT err (State.StateT (TCContext tvar var judgements) m)))
 
 
-runTypecheckT :: TypecheckT var judgements err m a -> TCContext var judgements -> m (Either err a, TCContext var judgements)
+runTypecheckT :: TypecheckT tvar var judgements err m a -> TCContext tvar var judgements -> m (Either err a, TCContext tvar var judgements)
 runTypecheckT (TypecheckT tc) = State.runStateT (Except.runExceptT tc) 
 
 class TypeSystem judgements where
     type ErrorIn judgements :: * -> *
     unify :: tag -> judgements -> judgements -> Either (ErrorIn judgements tag) judgements
 
-judge :: (TypeSystem judgements, MonadTypecheck var judgements m, Ord var) => var -> judgements -> m ()
-judge var newJudgements = do
-    judgements <- Map.lookup var <$> CS.get @"judgements"
+
+judgeVar :: (TypeSystem judgements, MonadTypecheck tvar var judgements m, Ord tvar, Ord var, Enum tvar) => var -> judgements -> m tvar
+judgeVar var newJudgements = do
+    associated <- Map.lookup var <$> CS.get @"direct"
+    tvar <- case associated of 
+        Just tvar -> return tvar
+        Nothing -> do
+            newTV <- mkFresh 
+            CS.modify' @"direct" (Map.insert var newTV)
+            return newTV
+    judge tvar newJudgements
+    return tvar
+
+
+judge :: (TypeSystem judgements, MonadTypecheck tvar var judgements m, Ord tvar) => tvar -> judgements -> m ()
+judge tvar newJudgements = do
+    judgements <- Map.lookup tvar <$> CS.get @"judgements"
     case judgements of
-        Nothing -> CS.modify' @"judgements" (Map.insert var newJudgements)
-        Just preexisting -> case unify var preexisting newJudgements of
-            Right consistent -> CS.modify' @"judgements" (Map.insert var consistent)
+        Nothing -> CS.modify' @"judgements" (Map.insert tvar newJudgements)
+        Just preexisting -> case unify tvar preexisting newJudgements of
+            Right consistent -> CS.modify' @"judgements" (Map.insert tvar consistent)
             Left err -> CE.throw @"type" err
 
 
@@ -161,32 +217,43 @@ judge var newJudgements = do
 --     -- I guess we can just do everything with normal terms
 
 -- How should we decide what terms are allowed at the top level? I guess just things that have type Bool?
+-- Do we distinguish between vars and finites/extrinsic terms?
 
-typecheck :: (Ord var, TypeSystem judgements, MonadTypecheck var judgements m) => judgements -> (finite -> judgements) -> Query finite var -> m ()
-typecheck defaultJudgement inferredFrom = go
+
+
+typecheck :: forall var judgements tvar j m extrinsic . (Ord var, TypeSystem judgements, MonadTypecheck tvar var judgements m, Ord tvar, Enum tvar, (forall tag . Monad (j tag)), Functor (ErrorIn judgements)) => Judge j judgements extrinsic -> Query extrinsic var -> m tvar
+typecheck dredd = go
     where
-    go (Member var finite) = judge var (inferredFrom finite)
-    go (Exists var q) = judge var defaultJudgement >> go q
-    go (And q1 q2) = go q1 >> go q2
+    go (Var var) = judgeVar var (jDefault dredd)
+    go (Exists var q) = judgeVar var (jDefault dredd) >> go q
+    go (Extrinsic ext) = do
+        extVar <- mkFresh
+        judge extVar $ jExtrinsic dredd ext
+        return extVar
+    go (Apply ext qs) = do
+        appliedType <- mkFresh
+        tvars <- traverse go qs -- Type all arguments
+        let judgeEach :: tvar -> j tvar (m ())
+            judgeEach argVar = do 
+                judgement <- jApply dredd argVar
+                return (judge argVar judgement)
+        (appliedJudgement, subjudgements) <- either (CE.throw @"type") return $ jRun dredd ext (traverse judgeEach tvars)
+        sequence_ subjudgements
+        judge appliedType appliedJudgement
+        return appliedType
+
+    -- go (Apply ext qs) = 
+    -- go (Exists var q) = judge var defaultJudgement >> go q
+    -- go (And q1 q2) = go q1 >> go q2
 
 
-data ExampleFinite 
-    = EInt [Int]
-    | EFloat [Float]
-    deriving Show
 
 
-exampleJudgements :: ExampleFinite -> Judgements
-exampleJudgements (EInt _) = Judgements True (Just TInt)
-exampleJudgements (EFloat _) = Judgements True (Just TFloat)
-
-
-
-process :: Ord name => Query ExampleFinite name -> (Query ExampleFinite VarID, RenameState name VarID, Either (TypeError VarID) (), TCContext VarID Judgements)
+process :: Ord name => Query ExampleExtrinsic name -> (Query ExampleExtrinsic VarID, RenameState name VarID, Either (ExampleTypeError TVarID) TVarID, TCContext TVarID VarID ExampleJudgements)
 process query = (renamed, renameState, typeResult, context)
     where
     (renamed, renameState) = runIdentity $ runRenameT (uniqify query) emptyRenameState
-    (typeResult, context) = runIdentity $ runTypecheckT (typecheck defaultJudgements exampleJudgements renamed) emptyTCContext
+    (typeResult, context) = runIdentity $ runTypecheckT (typecheck exampleJudge renamed) emptyTCContext
 
 
 
