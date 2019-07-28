@@ -93,8 +93,6 @@ uniqify (And q1 q2) = And <$> uniqify q1 <*> uniqify q2
 
 
 
-
-
 data Type = TInt | TFloat
     deriving (Eq, Ord, Show)
 
@@ -155,6 +153,15 @@ judge var newJudgements = do
             Left err -> CE.throw @"type" err
 
 
+-- class Database system where
+--     type Finite system :: * -- Finite terms (sets, maps, ranges)
+--     type Function system :: * 
+--     -- Instead of having a separate set of terms for propositional 
+--     -- constraints at the query level (equality, less than, etc.) 
+--     -- I guess we can just do everything with normal terms
+
+-- How should we decide what terms are allowed at the top level? I guess just things that have type Bool?
+
 typecheck :: (Ord var, TypeSystem judgements, MonadTypecheck var judgements m) => judgements -> (finite -> judgements) -> Query finite var -> m ()
 typecheck defaultJudgement inferredFrom = go
     where
@@ -180,6 +187,7 @@ process query = (renamed, renameState, typeResult, context)
     where
     (renamed, renameState) = runIdentity $ runRenameT (uniqify query) emptyRenameState
     (typeResult, context) = runIdentity $ runTypecheckT (typecheck defaultJudgements exampleJudgements renamed) emptyTCContext
+
 
 
 
