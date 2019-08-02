@@ -37,7 +37,12 @@ query extrinsics extrinsic = spacey go
     exists = lexeme *> (Exists <$> spacey ident <*> go)
         where
         lexeme = asum ["∃", "exists"]
-    apply = Apply <$> spacey extrinsic <*> many arg
+    apply =  do
+        fun <- spacey extrinsic_ -- TODO: Allow non-extrinic functions
+        arg1 <- arg
+        args <- many1 arg
+        return $ foldl Apply (Apply fun arg1) args
+        --Apply <$> spacey extrinsic <*> many arg
 
 
 exampleExtrinsics :: Set Text
@@ -45,8 +50,10 @@ exampleExtrinsics = fromList ["in", "∈", "and", "&", "∧"]
 
 
 exampleExtrinsic :: Parser ExampleExtrinsic
-exampleExtrinsic = EInt <$> ints_ 
+exampleExtrinsic = eint <|> emember 
     where
+    emember = EMember <$ (A.string "in" <|> A.string "∈")
+    eint = EInt <$> ints_ 
     ints_ = A.char '[' *> many int_ <* A.char ']'
     int_ = spacey decimal <* option ',' (A.char ',')
 

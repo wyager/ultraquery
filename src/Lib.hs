@@ -28,7 +28,7 @@ data Query ext var
     = Var var -- Constraint solver variables
     | Extrinsic ext -- Constant terms, defined outside of the core language.
     | Exists var (Query ext var)  -- Discharge a CSV
-    | Apply ext [Query ext var] -- Think about generalizing to (Apply (Query ext var) [Query ext var]). Do we want to allow CSVs to have function types?
+    | Apply (Query ext var) (Query ext var) -- Think about generalizing to (Apply (Query ext var) [Query ext var]). Do we want to allow CSVs to have function types?
     deriving Show
 
 data RenameState old new = RenameState {
@@ -93,7 +93,7 @@ uniqify (Extrinsic ext) = return (Extrinsic ext)
 uniqify (Exists var q) = do
     (q', new) <- withName var (uniqify q)
     return (Exists new q')
-uniqify (Apply ext qs) = Apply ext <$> traverse uniqify qs
+uniqify (Apply a b) = Apply <$> uniqify a <*> uniqify b
 
 
 
@@ -103,7 +103,7 @@ uniqify (Apply ext qs) = Apply ext <$> traverse uniqify qs
 
 data ExampleJudgements var = ExampleJudgements {
         finite :: Bool, -- Should probably keep a proof here
-        is :: Maybe (Type var)
+        is :: Type var
     } deriving Show
 
 
@@ -114,36 +114,45 @@ newtype ExampleJ var tag a = ExampleJ (State.StateT [var] (Except.Except (ErrorI
     deriving newtype (Functor, Applicative, Monad)
 
 exampleJudge :: Judge ExampleJ ExampleJudgements ExampleExtrinsic
-exampleJudge = Judge {jDefault = jDefault, jExtrinsic = jExtrinsic, jApply = jApply, jRun = jRun}
+exampleJudge = Judge {jExtrinsic = jExtrinsic, jIsFun = jIsFun}
     where
-    jDefault = ExampleJudgements False Nothing
-    jExtrinsic gen ext = fmap (\(rootJudgement, internalJudgements, _funVars) -> (rootJudgement, internalJudgements)) (jExtrinsic' gen ext )
-    jExtrinsic' gen = go
+    jExtrinsic judge gen = go
         where
-        with f = f <$> gen
-        with3 f = f <$> gen <*> gen <*> gen
-        go (EInt _) = with $ \a -> (j a, [internal a], [])
-            where
-            j a = ExampleJudgements {finite = True, is = Just (TSet a)} 
-            internal a = (a, ExampleJudgements {finite = True, is = Just TInt})
-        go (EFloat _) = with $ \a -> (j a, [internal a], [])
-            where
-            j a = ExampleJudgements {finite = True, is = Just (TSet a)} 
-            internal a = (a, ExampleJudgements {finite = True, is = Just TFloat})
-        go EMember = with3 $ \a b c -> (j a b c, internals a b c, []) -- I need to think about this a bit more. I'm confusing myself with the 
-        -- type of fully applying the function vs the type of the function itself. Do I need a separate type variable c at all?
-        -- I think I definitely need to put a,b in the list. c might need special treatment? Or maybe a list is just the wrong structure.
-        -- Maybe I really need  [data X = Z t | F t X]
-            where
-            j a b c = ExampleJudgements {finite = True, is = Just (TFun [a,b] c)} -- TODO: See if I can remove the Maybe now that I have tvars
-            internals a b c = [(b, ExampleJudgements {finite = True, is = Just (TSet a)})
-                              ,(c, ExampleJudgements {finite = True, is = Just TBool})]
-    jApply tag = ExampleJ $ Except.throwError (Function tag)
-    jRun :: forall a t v f . Applicative f => f v -> ExampleExtrinsic -> ExampleJ v t a -> f (Either (ErrorIn ExampleJudgements v t) (((ExampleJudgements v, [(v, ExampleJudgements v)])), a))
-    jRun mkVar ext (ExampleJ e) = f <$> jExtrinsic mkVar ext
-        where
-        f = undefined -- This function needs to run the underlying StateT (keeping track of which arg to the function gets which judgements)
-        -- I think maybe I don't need to actually return the list of judgements since judgeEach does that
+        genWith judgement = do
+            var <- gen
+            () <- judge var judgement
+            return var
+        go (EInt _) = do
+            tInt <- genWith $ ExampleJudgements {finite = True, is = TInt}
+            tSet <- genWith $ ExampleJudgements {finite = True, is = (TSet tInt)} 
+            return tSet
+        go (EFloat _) = do
+            tFloat <- genWith $ ExampleJudgements {finite = True, is = TFloat} 
+            tSet <- genWith $ ExampleJudgements {finite = True, is = (TSet tFloat)} 
+            return tSet
+        go EMember = do
+            tRet <- genWith $ ExampleJudgements {finite = True, is = TBool} 
+            tSingleton <- gen -- TODO: Add ord constraint. Have to add constraints to type system first
+            tSet <- genWith $ ExampleJudgements {finite = True, is = (TSet tSingleton)} 
+            tAp1 <- genWith $ ExampleJudgements {finite = True, is = (TFun tSet tRet)}
+            tAp2 <- genWith $ ExampleJudgements {finite = True, is = (TFun tSingleton tAp1)}
+            return tAp2
+    jIsFun arg ret = ExampleJudgements {finite = False, is =  (TFun arg ret)}
+
+        -- with3 $ \a b c -> (j a b c, internals a b c, []) -- I need to think about this a bit more. I'm confusing myself with the 
+        -- -- type of fully applying the function vs the type of the function itself. Do I need a separate type variable c at all?
+        -- -- I think I definitely need to put a,b in the list. c might need special treatment? Or maybe a list is just the wrong structure.
+        -- -- Maybe I really need  [data X = Z t | F t X]
+        --     where
+        --     j a b c = ExampleJudgements {finite = True, is = Just (TFun [a,b] c)} -- TODO: See if I can remove the Maybe now that I have tvars
+        --     internals a b c = [(b, ExampleJudgements {finite = True, is = Just (TSet a)})
+        --                       ,(c, ExampleJudgements {finite = True, is = Just TBool})]
+    -- jApply tag = ExampleJ $ Except.throwError (Function tag)
+    -- jRun :: forall a t v f . Applicative f => f v -> ExampleExtrinsic -> ExampleJ v t a -> f (Either (ErrorIn ExampleJudgements v t) (((ExampleJudgements v, [(v, ExampleJudgements v)])), a))
+    -- jRun mkVar ext (ExampleJ e) = f <$> jExtrinsic mkVar ext
+    --     where
+    --     f = undefined -- This function needs to run the underlying StateT (keeping track of which arg to the function gets which judgements)
+    --     -- I think maybe I don't need to actually return the list of judgements since judgeEach does that
 
 
 data ExampleExtrinsic 
@@ -152,34 +161,25 @@ data ExampleExtrinsic
     | EMember
     deriving Show
 
-data Judge j judgements extrinsic = Judge {
-        jDefault :: forall var . judgements var, 
-        jExtrinsic :: forall var f . Applicative f => f var -> extrinsic -> f (judgements var, [(var, judgements var)]), -- I need to let them unify created vars (with concrete types only?). Eg with this I can do TSet a, but not TSet Int
-        jApply :: forall tag var . tag -> j var tag (judgements var), -- Used to generate judgements over the list of things
-        jRun :: forall a tag var f . Applicative f => f var -> extrinsic -> j var tag a -> f (Either (ErrorIn judgements var tag) ((judgements var, [(var, judgements var)]), a))
-    }
 
 data ExampleTypeError var tag = UnificationFailure (Type var) (Type var) tag | Function tag deriving (Show, Functor)
 
-data Type var = TInt | TFloat | TFun [var] var | TSet var | TBool
+data Type var = TInt | TFloat | TFun var var | TSet var | TBool
     deriving (Eq, Ord, Show)
 
 -- We need to make this monadic. It should check that the structure of x and y are the same, while emitting 
 -- unifications of their variables.
-unifyMaybe :: Monad m => (var -> var -> m var) -> tag -> Maybe (Type var) -> Maybe (Type var) -> m (Either (ExampleTypeError var tag) (Maybe (Type var)))
-unifyMaybe u t = loop 
+unifyType :: Monad m => (var -> var -> m var') -> tag -> Type var -> Type var -> m (Either (ExampleTypeError var tag) (Type var'))
+unifyType u t = go 
     where
-    loop Nothing a = return (Right a)
-    loop (Just x) Nothing = return (Right (Just x))
-    loop (Just x) (Just y) = go x y 
-    go TInt TInt = return (Right (Just TInt))
-    go TFloat TFloat = return (Right (Just TFloat))
-    go (TFun xs x) (TFun ys y) | length xs == length ys = Right . Just  <$> (TFun <$> zipWithM u xs ys <*> u x y)
+    go TInt TInt = return (Right TInt)
+    go TFloat TFloat = return (Right TFloat)
+    go (TFun ix ox) (TFun iy oy) = Right <$> (TFun <$> u ix iy <*> u ox oy)
     go x y = return $ Left (UnificationFailure x y t)
 
 instance TypeSystem ExampleJudgements where
     type ErrorIn ExampleJudgements = ExampleTypeError
-    unifyOne u tag (ExampleJudgements f1 i1) (ExampleJudgements f2 i2) = fmap (fmap (ExampleJudgements (f1 || f2))) $ unifyMaybe u tag i1 i2
+    unifyOne u tag (ExampleJudgements f1 i1) (ExampleJudgements f2 i2) = fmap (fmap (ExampleJudgements (f1 || f2))) $ unifyType u tag i1 i2
 
 data TCContext tvar var judgements = TCContext 
     { direct :: Map var tvar
@@ -218,7 +218,7 @@ runTypecheckT (TypecheckT tc) = State.runStateT (Except.runExceptT tc)
 class TypeSystem judgements where
     type ErrorIn judgements :: * ->  * -> *
     -- Unify a single level of judgements. E.g. if you have [Set a] and [Set b], unify the [Set]s but outsource unifying a,b via the first arg
-    unifyOne :: Monad m => (var -> var -> m var) -> tag -> judgements var -> judgements var -> m (Either (ErrorIn judgements var tag) (judgements var))
+    unifyOne :: Monad m => (var -> var -> m var') -> tag -> judgements var -> judgements var -> m (Either (ErrorIn judgements var tag) (judgements var'))
 
 
 judgeVar :: (TypeSystem judgements, MonadTypecheck tvar var judgements m, Ord tvar, Ord var, Enum tvar) => var -> judgements tvar -> m tvar
@@ -252,12 +252,15 @@ judge tvar newJudgements = do
     unifyVar :: tvar -> tvar -> m tvar
     unifyVar a b = do
         new <- mkFresh
-        let find :: tvar -> Map tvar (judgements tvar) -> m (judgements tvar)
-            find var = maybe (CE.throw @"bug" $ Deleted var) return . Map.lookup var
-        ja <- find a =<< CS.get @"judgements"
-        jb <- find b =<< CS.get @"judgements"
-        judge new ja 
-        judge new jb
+        -- let find :: tvar -> Map tvar (judgements tvar) -> m (judgements tvar)
+        --     find var = maybe (CE.throw @"bug" $ Deleted var) return . Map.lookup var
+        judgements <- CS.get @"judgements"
+        maybe (return ()) (judge new) $ Map.lookup a judgements
+        maybe (return ()) (judge new) $ Map.lookup b judgements
+        -- ja <- find a =<< 
+        -- jb <- find b =<< CS.get @"judgements"
+        -- judge new ja 
+        -- judge new jb
         a `replacedBy` new 
         b `replacedBy` new
         return new
@@ -276,32 +279,26 @@ judge tvar newJudgements = do
 -- Do we distinguish between vars and finites/extrinsic terms?
 
 
+data Judge j judgements extrinsic = Judge {
+        jExtrinsic :: forall var f . Monad f => (var -> judgements var -> f ()) -> f var -> extrinsic -> f var, -- I need to let them unify created vars (with concrete types only?). Eg with this I can do TSet a, but not TSet Int
+        jIsFun :: forall var . var -> var -> judgements var
+    }
 
+
+-- TODO: Add a final unification step to concretize return type. Can use union-find
 typecheck :: forall var judgements tvar j m extrinsic . (Ord var, TypeSystem judgements, MonadTypecheck tvar var judgements m, Ord tvar, Enum tvar, (forall tag var . Monad (j var tag)), Functor (ErrorIn judgements var)) => Judge j judgements extrinsic -> Query extrinsic var -> m tvar
 typecheck dredd = go
     where
     go :: Query extrinsic var -> m tvar
-    go (Var var) = judgeVar var (jDefault dredd)
-    go (Exists var q) = judgeVar var (jDefault dredd) >> go q
-    go (Extrinsic ext) = do
-        extVar <- mkFresh :: m tvar
-        (judgement, internalUnifications) <- jExtrinsic dredd mkFresh ext
-        mapM_ (uncurry judge) internalUnifications
-        judge extVar judgement 
-        return extVar
+    go (Var _var) = mkFresh
+    go (Exists _var q) = go q
+    go (Extrinsic ext) = jExtrinsic dredd judge mkFresh ext
     go (Apply ext qs) = do
-        appliedType <- mkFresh
-        tvars <- traverse go qs -- Type all arguments
-        let judgeEach :: tvar -> j tvar tvar (m ())
-            judgeEach argVar = do 
-                judgement <- jApply dredd argVar
-                return (judge argVar judgement)
-        judgeExtResult <- jRun dredd mkFresh ext (traverse judgeEach tvars)
-        ((appliedRootJudgement, appliedInternalJudgements), subjudgements) <- either (CE.throw @"type") return judgeExtResult
-        sequence_ subjudgements
-        judge appliedType appliedRootJudgement
-        mapM_ (uncurry judge) appliedInternalJudgements
-        return appliedType
+        retTy <- mkFresh
+        argTy <- go qs
+        funTy <- go ext
+        judge funTy (jIsFun dredd argTy retTy)
+        return retTy
 
     -- go (Apply ext qs) = 
     -- go (Exists var q) = judge var defaultJudgement >> go q
