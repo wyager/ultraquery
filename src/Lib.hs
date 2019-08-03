@@ -103,7 +103,7 @@ uniqify (Apply a b) = Apply <$> uniqify a <*> uniqify b
 data ExampleJudgements var = ExampleJudgements {
         finite :: Bool, -- Should probably keep a proof here
         is :: Type var
-    } deriving Show
+    } deriving (Show, Functor)
 
 
 data The x = The x
@@ -164,7 +164,7 @@ data ExampleExtrinsic
 data ExampleTypeError var tag = UnificationFailure (Type var) (Type var) tag | Function tag deriving (Show, Functor)
 
 data Type var = TInt | TFloat | TFun var var | TSet var | TBool
-    deriving (Eq, Ord, Show)
+    deriving (Eq, Ord, Show, Functor)
 
 -- We need to make this monadic. It should check that the structure of x and y are the same, while emitting 
 -- unifications of their variables.
@@ -211,7 +211,7 @@ newtype TypecheckT tvar var judgements err m a = TypecheckT {getTypecheckT :: Ex
 runTypecheckT :: TypecheckT tvar var judgements err m a -> TCContext tvar var judgements -> m (Either (TypeCheckError tvar err) a, TCContext tvar var judgements)
 runTypecheckT (TypecheckT tc) = State.runStateT (Except.runExceptT tc) 
 
-class TypeSystem judgements where
+class Functor judgements => TypeSystem judgements where
     type ErrorIn judgements :: * ->  * -> *
     -- Unify a single level of judgements. E.g. if you have [Set a] and [Set b], unify the [Set]s but outsource unifying a,b via the first arg
     unifyOne :: Monad m => (var -> var -> m var') -> tag -> judgements var -> judgements var -> m (Either (ErrorIn judgements var tag) (judgements var'))
@@ -242,8 +242,10 @@ judge tvar newJudgements = do
     where
     replacedBy :: tvar -> tvar -> m ()
     a `replacedBy` b = do
-        CS.modify @"direct" (fmap (\tv -> if tv == a then b else tv))
+        let replace tv = if tv == a then b else tv
+        CS.modify @"direct" (fmap replace)
         CS.modify @"judgements" (Map.delete a)
+        CS.modify @"judgements" (fmap (fmap replace))
     unifyVar :: tvar -> tvar -> m tvar
     unifyVar a b = do
         new <- mkFresh
@@ -251,13 +253,13 @@ judge tvar newJudgements = do
         --     find var = maybe (CE.throw @"bug" $ Deleted var) return . Map.lookup var
         judgements <- CS.get @"judgements"
         maybe (return ()) (judge new) $ Map.lookup a judgements
+        a `replacedBy` new 
         maybe (return ()) (judge new) $ Map.lookup b judgements
+        b `replacedBy` new
         -- ja <- find a =<< 
         -- jb <- find b =<< CS.get @"judgements"
         -- judge new ja 
         -- judge new jb
-        a `replacedBy` new 
-        b `replacedBy` new
         return new
 
 
@@ -307,12 +309,13 @@ type MonadTypecheck tvar var judgements m =
 
 
 {-
+direct = fromList [(<0>,{8})]
 
-{2} -> TFun {1} {0}
-{4} -> TBool
-{6} -> TSet {5}
-{8} -> TFun {9} {10}
-{10} -> TFun {6} {4}
+({2},ExampleJudgements {finite = False, is = TFun {1} {VRet}}
+({VBool},ExampleJudgements {finite = True, is = TBool}
+({SetOfX},ExampleJudgements {finite = True, is = TSet {X}}
+({In},ExampleJudgements {finite = True, is = TFun {X} {IsMemberOfSetOfX}}
+({IsMemberOfSetOfX},ExampleJudgements {finite = True, is = TFun {SetOfX} {VBool}}
 
 -}
 
