@@ -16,7 +16,6 @@ import   Capability.Error (HasThrow, MonadError)
 import   Capability.Reader (HasReader)
 import GHC.Generics (Generic)
 import Control.Monad.Identity (runIdentity)
-import Control.Monad (zipWithM)
 import Control.Applicative ((<|>))
 
 someFunc :: IO ()
@@ -116,11 +115,11 @@ newtype ExampleJ var tag a = ExampleJ (State.StateT [var] (Except.Except (ErrorI
 exampleJudge :: Judge ExampleJ ExampleJudgements ExampleExtrinsic
 exampleJudge = Judge {jExtrinsic = jExtrinsic, jIsFun = jIsFun}
     where
-    jExtrinsic judge gen = go
+    jExtrinsic judge_ gen = go
         where
         genWith judgement = do
             var <- gen
-            () <- judge var judgement
+            () <- judge_ var judgement
             return var
         go (EInt _) = do
             tInt <- genWith $ ExampleJudgements {finite = True, is = TInt}
@@ -187,17 +186,14 @@ data TCContext tvar var judgements = TCContext
     , freshTV :: tvar
     } deriving (Generic, Show)
 
+
+
 emptyTCContext :: Enum tvar => TCContext tvar var judgements
 emptyTCContext = TCContext Map.empty Map.empty (toEnum 0)
 
 -- newtype TypecheckT 
 
-type MonadTypecheck tvar var judgements m = 
-    (HasState "direct" (Map var tvar) m,
-     HasState "judgements" (Map tvar (judgements tvar)) m, 
-     HasState "fresh" tvar m,
-     HasThrow "type" (ErrorIn judgements tvar tvar) m,
-     HasThrow "bug" (Bug tvar) m)
+
 
 data Bug tvar = Deleted tvar deriving Show
 
@@ -221,8 +217,8 @@ class TypeSystem judgements where
     unifyOne :: Monad m => (var -> var -> m var') -> tag -> judgements var -> judgements var -> m (Either (ErrorIn judgements var tag) (judgements var'))
 
 
-judgeVar :: (TypeSystem judgements, MonadTypecheck tvar var judgements m, Ord tvar, Ord var, Enum tvar) => var -> judgements tvar -> m tvar
-judgeVar var newJudgements = do
+judgeVar :: (TypeSystem judgements, MonadTypecheck tvar var judgements m, Ord tvar, Ord var, Enum tvar) => var -> m tvar
+judgeVar var = do
     associated <- Map.lookup var <$> CS.get @"direct"
     tvar <- case associated of 
         Just tvar -> return tvar
@@ -230,7 +226,6 @@ judgeVar var newJudgements = do
             newTV <- mkFresh 
             CS.modify' @"direct" (Map.insert var newTV)
             return newTV
-    judge tvar newJudgements
     return tvar
 
 
@@ -286,12 +281,12 @@ data Judge j judgements extrinsic = Judge {
 
 
 -- TODO: Add a final unification step to concretize return type. Can use union-find
-typecheck :: forall var judgements tvar j m extrinsic . (Ord var, TypeSystem judgements, MonadTypecheck tvar var judgements m, Ord tvar, Enum tvar, (forall tag var . Monad (j var tag)), Functor (ErrorIn judgements var)) => Judge j judgements extrinsic -> Query extrinsic var -> m tvar
+typecheck :: forall var judgements tvar j m extrinsic . (Ord var, TypeSystem judgements, MonadTypecheck tvar var judgements m, Ord tvar, Enum tvar, (forall tag var' . Monad (j var' tag)), Functor (ErrorIn judgements var)) => Judge j judgements extrinsic -> Query extrinsic var -> m tvar
 typecheck dredd = go
     where
     go :: Query extrinsic var -> m tvar
-    go (Var _var) = mkFresh
-    go (Exists _var q) = go q
+    go (Var var) = judgeVar var
+    go (Exists var q) = judgeVar var >> go q
     go (Extrinsic ext) = jExtrinsic dredd judge mkFresh ext
     go (Apply ext qs) = do
         retTy <- mkFresh
@@ -303,9 +298,27 @@ typecheck dredd = go
     -- go (Apply ext qs) = 
     -- go (Exists var q) = judge var defaultJudgement >> go q
     -- go (And q1 q2) = go q1 >> go q2
+type MonadTypecheck tvar var judgements m = 
+    (HasState "direct" (Map var tvar) m,
+     HasState "judgements" (Map tvar (judgements tvar)) m, 
+     HasState "fresh" tvar m,
+     HasThrow "type" (ErrorIn judgements tvar tvar) m,
+     HasThrow "bug" (Bug tvar) m)
 
 
+{-
 
+{2} -> TFun {1} {0}
+{4} -> TBool
+{6} -> TSet {5}
+{8} -> TFun {9} {10}
+{10} -> TFun {6} {4}
+
+-}
+
+-- Takes all unifications to their logical conclusion
+postprocess :: (MonadTypecheck tvar var judgements m, Ord tvar) => m ()
+postprocess = undefined 
 
 process :: Ord name => Query ExampleExtrinsic name -> (Query ExampleExtrinsic VarID, RenameState name VarID, Either (TypeCheckError TVarID (ExampleTypeError TVarID TVarID)) TVarID, TCContext TVarID VarID (ExampleJudgements TVarID))
 process query = (renamed, renameState, typeResult, context)
