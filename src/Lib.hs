@@ -28,7 +28,7 @@ data Query ext var
     | Extrinsic ext -- Constant terms, defined outside of the core language.
     | Exists var (Query ext var)  -- Discharge a CSV
     | Apply (Query ext var) (Query ext var) -- Think about generalizing to (Apply (Query ext var) [Query ext var]). Do we want to allow CSVs to have function types?
-    deriving Show
+    deriving (Show, Functor, Foldable, Traversable)
 
 data RenameState old new = RenameState {
         free :: Map old new, -- Free variables
@@ -113,7 +113,7 @@ newtype ExampleJ var tag a = ExampleJ (State.StateT [var] (Except.Except (ErrorI
     deriving newtype (Functor, Applicative, Monad)
 
 exampleJudge :: Judge ExampleJ ExampleJudgements ExampleExtrinsic
-exampleJudge = Judge {jExtrinsic = jExtrinsic, jIsFun = jIsFun}
+exampleJudge = Judge {jExtrinsic = jExtrinsic}
     where
     jExtrinsic judge_ gen = go
         where
@@ -136,7 +136,7 @@ exampleJudge = Judge {jExtrinsic = jExtrinsic, jIsFun = jIsFun}
             tAp1 <- genWith $ ExampleJudgements {finite = True, is = (TFun tSet tRet)}
             tAp2 <- genWith $ ExampleJudgements {finite = True, is = (TFun tSingleton tAp1)}
             return tAp2
-    jIsFun arg ret = ExampleJudgements {finite = False, is =  (TFun arg ret)}
+    -- jIsFun arg ret = ExampleJudgements {finite = False, is =  (TFun arg ret)}
 
         -- with3 $ \a b c -> (j a b c, internals a b c, []) -- I need to think about this a bit more. I'm confusing myself with the 
         -- -- type of fully applying the function vs the type of the function itself. Do I need a separate type variable c at all?
@@ -160,11 +160,18 @@ data ExampleExtrinsic
     | EMember
     deriving Show
 
+ 
+data ExampleTypeError var tag = UnificationFailure (Type var) (Type var) tag | NotFunction (Type var) tag deriving (Show, Functor)
 
-data ExampleTypeError var tag = UnificationFailure (Type var) (Type var) tag | Function tag deriving (Show, Functor)
-
-data Type var = TInt | TFloat | TFun var var | TSet var | TBool
+data Type var 
+    = TInt 
+    | TFloat
+    | TFun var var  -- arg, ret
+    | TSet var 
+    | TBool
     deriving (Eq, Ord, Show, Functor)
+
+
 
 -- We need to make this monadic. It should check that the structure of x and y are the same, while emitting 
 -- unifications of their variables.
@@ -173,12 +180,24 @@ unifyType u t = go
     where
     go TInt TInt = return (Right TInt)
     go TFloat TFloat = return (Right TFloat)
+    go TBool TBool = return (Right TBool)
     go (TFun ix ox) (TFun iy oy) = Right <$> (TFun <$> u ix iy <*> u ox oy)
+    go (TSet a) (TSet b) = Right . TSet <$> u a b
     go x y = return $ Left (UnificationFailure x y t)
+
+applyType ::  Monad m => (var -> var -> m ()) -> tag -> Type var -> var -> m (Either (ExampleTypeError var tag) var)
+applyType unify tag t1 arg = case t1 of
+    TFun i o -> do
+        unify i arg-- Pretty sure constructing an EJ here is wrong. Maybe I need two separate functions, for unifying cardinality and type? Or just add back the Nothing constructor of [is]?
+        return $ Right o
+    _ -> return $ Left (NotFunction t1 tag)
 
 instance TypeSystem ExampleJudgements where
     type ErrorIn ExampleJudgements = ExampleTypeError
+    topLevel = ExampleJudgements {finite = False, is = TBool}
     unifyOne u tag (ExampleJudgements f1 i1) (ExampleJudgements f2 i2) = fmap (fmap (ExampleJudgements (f1 || f2))) $ unifyType u tag i1 i2
+    tApply judge_ tag (ExampleJudgements _f1 i1) i2 = applyType judge_ tag i1 i2 -- TODO: I need to figure out the correct way to propagate finitarity/membership info with apply. Will probably involve making a way to make finitarity judgements without also having an associated Type on hand?
+    tIsFun i o = ExampleJudgements False (TFun i o)
 
 data TCContext tvar var judgements = TCContext 
     { direct :: Map var tvar
@@ -211,10 +230,16 @@ newtype TypecheckT tvar var judgements err m a = TypecheckT {getTypecheckT :: Ex
 runTypecheckT :: TypecheckT tvar var judgements err m a -> TCContext tvar var judgements -> m (Either (TypeCheckError tvar err) a, TCContext tvar var judgements)
 runTypecheckT (TypecheckT tc) = State.runStateT (Except.runExceptT tc) 
 
+
+
 class Functor judgements => TypeSystem judgements where
     type ErrorIn judgements :: * ->  * -> *
     -- Unify a single level of judgements. E.g. if you have [Set a] and [Set b], unify the [Set]s but outsource unifying a,b via the first arg
     unifyOne :: Monad m => (var -> var -> m var') -> tag -> judgements var -> judgements var -> m (Either (ErrorIn judgements var tag) (judgements var'))
+    topLevel :: judgements var
+    tApply :: Monad m => (var -> var -> m ()) -> tag -> judgements var -> var -> m (Either (ErrorIn judgements var tag) var)
+    tIsFun :: var -> var -> judgements var
+    -- applyT :: judgements var -> judgements var -> Either (ErrorIn
 
 
 judgeVar :: (TypeSystem judgements, MonadTypecheck tvar var judgements m, Ord tvar, Ord var, Enum tvar) => var -> m tvar
@@ -239,15 +264,10 @@ judge tvar newJudgements = do
             case unified of
                 Right consistent -> CS.modify' @"judgements" (Map.insert tvar consistent)
                 Left err -> CE.throw @"type" err
-    where
-    replacedBy :: tvar -> tvar -> m ()
-    a `replacedBy` b = do
-        let replace tv = if tv == a then b else tv
-        CS.modify @"direct" (fmap replace)
-        CS.modify @"judgements" (Map.delete a)
-        CS.modify @"judgements" (fmap (fmap replace))
-    unifyVar :: tvar -> tvar -> m tvar
-    unifyVar a b = do
+    
+
+unifyVar :: forall tvar var judgements m . (TypeSystem judgements, MonadTypecheck tvar var judgements m, Ord tvar, Enum tvar) => tvar -> tvar -> m tvar
+unifyVar a b = do
         new <- mkFresh
         -- let find :: tvar -> Map tvar (judgements tvar) -> m (judgements tvar)
         --     find var = maybe (CE.throw @"bug" $ Deleted var) return . Map.lookup var
@@ -256,12 +276,25 @@ judge tvar newJudgements = do
         a `replacedBy` new 
         maybe (return ()) (judge new) $ Map.lookup b judgements
         b `replacedBy` new
-        -- ja <- find a =<< 
-        -- jb <- find b =<< CS.get @"judgements"
-        -- judge new ja 
-        -- judge new jb
         return new
 
+replacedBy :: forall tvar var judgements m . (TypeSystem judgements, MonadTypecheck tvar var judgements m, Ord tvar, Enum tvar) => tvar -> tvar -> m ()
+a `replacedBy` b = do
+    let replace tv = if tv == a then b else tv
+    CS.modify @"direct" (fmap replace)
+    CS.modify @"judgements" (Map.delete a)
+    CS.modify @"judgements" (fmap (fmap replace))
+
+
+apply :: forall tvar var judgements m . (TypeSystem judgements, MonadTypecheck tvar var judgements m, Ord tvar, Enum tvar) => tvar -> tvar -> m tvar
+apply fun arg = do
+    funJudgements <- (Map.lookup fun <$> CS.get @"judgements") >>= \case
+        Nothing -> tIsFun <$> mkFresh <*> mkFresh
+        Just j -> return j
+    result <- tApply (\a b -> () <$ unifyVar a b) fun funJudgements arg
+    case result of
+        Right resVar -> return resVar
+        Left err -> CE.throw @"type" err
 
 
 
@@ -277,25 +310,36 @@ judge tvar newJudgements = do
 
 
 data Judge j judgements extrinsic = Judge {
-        jExtrinsic :: forall var f . Monad f => (var -> judgements var -> f ()) -> f var -> extrinsic -> f var, -- I need to let them unify created vars (with concrete types only?). Eg with this I can do TSet a, but not TSet Int
-        jIsFun :: forall var . var -> var -> judgements var
+        jExtrinsic :: forall var f . Monad f => (var -> judgements var -> f ()) -> f var -> extrinsic -> f var -- I need to let them unify created vars (with concrete types only?). Eg with this I can do TSet a, but not TSet Int
+        -- jIsFun :: forall var . var -> var -> judgements var,
+        -- jTopLevel :: forall var . judgements var -- Used for top level statements (i.e. the root expression, as well as the RHS of forall/exists/etc.)
     }
 
 
 -- TODO: Add a final unification step to concretize return type. Can use union-find
 typecheck :: forall var judgements tvar j m extrinsic . (Ord var, TypeSystem judgements, MonadTypecheck tvar var judgements m, Ord tvar, Enum tvar, (forall tag var' . Monad (j var' tag)), Functor (ErrorIn judgements var)) => Judge j judgements extrinsic -> Query extrinsic var -> m tvar
-typecheck dredd = go
+typecheck dredd query = do
+        tlv <- go query
+        judge tlv topLevel
+        return tlv
     where
     go :: Query extrinsic var -> m tvar
     go (Var var) = judgeVar var
-    go (Exists var q) = judgeVar var >> go q
+    go (Exists _var q) = do -- TODO: Use _var when calculating set membership/exclusion
+        rhs <- go q
+        judge rhs topLevel
+        return rhs
     go (Extrinsic ext) = jExtrinsic dredd judge mkFresh ext
     go (Apply ext qs) = do
-        retTy <- mkFresh
-        argTy <- go qs
+        -- retTy <- mkFresh
         funTy <- go ext
-        judge funTy (jIsFun dredd argTy retTy)
-        return retTy
+        argTy <- go qs
+        apply funTy argTy
+        -- applyT judge () funTy argTy >>= \case 
+        --     Left err -> CE.throw @"type" err
+        --     Right var -> return var
+        -- judge funTy (jIsFun dredd argTy retTy)
+        -- return retTy
 
     -- go (Apply ext qs) = 
     -- go (Exists var q) = judge var defaultJudgement >> go q
@@ -307,15 +351,25 @@ type MonadTypecheck tvar var judgements m =
      HasThrow "type" (ErrorIn judgements tvar tvar) m,
      HasThrow "bug" (Bug tvar) m)
 
+annotateWith :: (MonadTypecheck tvar var judgements m, Ord var, Ord tvar) => (var -> Maybe tvar -> Maybe (judgements tvar) -> annotated) -> var -> m annotated
+annotateWith f var = do
+    direct <- CS.get @"direct"
+    judgements <- CS.get @"judgements"
+    let tvar = Map.lookup var direct
+        jm = flip Map.lookup judgements =<< tvar
+    return $ f var tvar jm
+            
+
+
+
 
 {-
-direct = fromList [(<0>,{8})]
 
-({2},ExampleJudgements {finite = False, is = TFun {1} {VRet}}
-({VBool},ExampleJudgements {finite = True, is = TBool}
-({SetOfX},ExampleJudgements {finite = True, is = TSet {X}}
-({In},ExampleJudgements {finite = True, is = TFun {X} {IsMemberOfSetOfX}}
-({IsMemberOfSetOfX},ExampleJudgements {finite = True, is = TFun {SetOfX} {VBool}}
+{0} -> TBool
+{3} -> 
+{4} -> TFun {7} {TFun {7} {TBool}}
+{7} -> TSet {7}
+
 
 -}
 
@@ -323,11 +377,27 @@ direct = fromList [(<0>,{8})]
 postprocess :: (MonadTypecheck tvar var judgements m, Ord tvar) => m ()
 postprocess = undefined 
 
-process :: Ord name => Query ExampleExtrinsic name -> (Query ExampleExtrinsic VarID, RenameState name VarID, Either (TypeCheckError TVarID (ExampleTypeError TVarID TVarID)) TVarID, TCContext TVarID VarID (ExampleJudgements TVarID))
+data ExampleAnnotated tvar var = ExampleAnnotated {anVar :: var, anTvar :: Maybe tvar,  anJudgement :: Maybe (ExampleJudgements tvar)}
+
+instance (Show var, Show tvar) => Show (ExampleAnnotated tvar var) where
+    show (ExampleAnnotated var tv judgement) = "(" ++ show var ++ " : " ++ tv' ++ " ~ " ++ judgment' ++ ")"
+        where
+        tv' = case tv of
+            Nothing -> "?"
+            Just tv_ -> show tv_
+        judgment' = case judgement of
+            Nothing -> "?"
+            Just (ExampleJudgements _ is) -> show is
+
+process :: Ord name => Query ExampleExtrinsic name -> (Query ExampleExtrinsic VarID, RenameState name VarID, Either (TypeCheckError TVarID (ExampleTypeError TVarID TVarID)) (TVarID, Query ExampleExtrinsic (ExampleAnnotated TVarID VarID)), TCContext TVarID VarID (ExampleJudgements TVarID))
 process query = (renamed, renameState, typeResult, context)
     where
     (renamed, renameState) = runIdentity $ runRenameT (uniqify query) emptyRenameState
-    (typeResult, context) = runIdentity $ runTypecheckT (typecheck exampleJudge renamed) emptyTCContext
+    theCheck = do 
+        topLevelTvar <- typecheck exampleJudge renamed
+        annotated <- traverse (annotateWith ExampleAnnotated) renamed
+        return (topLevelTvar, annotated)
+    (typeResult, context) = runIdentity $ runTypecheckT theCheck emptyTCContext
 
 
 
