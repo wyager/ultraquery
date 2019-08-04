@@ -17,6 +17,7 @@ import   Capability.Reader (HasReader)
 import GHC.Generics (Generic)
 import Control.Monad.Identity (runIdentity)
 import Control.Applicative ((<|>))
+import Control.Monad (when)
 
 someFunc :: IO ()
 someFunc = putStrLn "someFunc"
@@ -103,7 +104,7 @@ uniqify (Apply a b) = Apply <$> uniqify a <*> uniqify b
 data ExampleJudgements var = ExampleJudgements {
         finite :: Bool, -- Should probably keep a proof here
         is :: Type var
-    } deriving (Show, Functor)
+    } deriving (Show, Functor, Foldable)
 
 
 data The x = The x
@@ -158,7 +159,7 @@ data ExampleExtrinsic
     deriving Show
 
  
-data ExampleTypeError var tag = UnificationFailure (Type var) (Type var) tag | NotFunction (Type var) tag deriving (Show, Functor)
+data ExampleTypeError var tag = UnificationFailure (Type var) (Type var) tag | NotFunction (Type var) tag | InfiniteType var deriving (Show, Functor)
 
 data Type var 
     = TInt 
@@ -166,7 +167,7 @@ data Type var
     | TFun var var  -- arg, ret
     | TSet var 
     | TBool
-    deriving (Eq, Ord, Show, Functor)
+    deriving (Eq, Ord, Show, Functor, Foldable)
 
 
 
@@ -371,8 +372,12 @@ annotateWith f var = do
 -}
 
 -- Takes all unifications to their logical conclusion
-postprocess :: (MonadTypecheck tvar var judgements m, Ord tvar) => m ()
-postprocess = undefined 
+postprocess :: (MonadTypecheck tvar var judgements m, Ord tvar, ErrorIn judgements ~ ExampleTypeError, Foldable judgements) => m ()
+postprocess = do
+    judgements <- CS.get @"judgements"
+    let checkForInfiniteTypes tvar judgement = when (any (== tvar) judgement) (CE.throw @"type" $ InfiniteType tvar)
+    _ <- Map.traverseWithKey checkForInfiniteTypes judgements
+    return ()
 
 data ExampleAnnotated tvar var = ExampleAnnotated {anVar :: var, anTvar :: Maybe tvar,  anJudgement :: Maybe (ExampleJudgements tvar)}
 
@@ -392,6 +397,7 @@ process query = (renamed, renameState, typeResult, context)
     (renamed, renameState) = runIdentity $ runRenameT (uniqify query) emptyRenameState
     theCheck = do 
         topLevelTvar <- typecheck exampleJudge renamed
+        postprocess
         annotated <- traverse (annotateWith ExampleAnnotated) renamed
         return (topLevelTvar, annotated)
     (typeResult, context) = runIdentity $ runTypecheckT theCheck emptyTCContext
