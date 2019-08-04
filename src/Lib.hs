@@ -109,10 +109,7 @@ data ExampleJudgements var = ExampleJudgements {
 data The x = The x
 
 
-newtype ExampleJ var tag a = ExampleJ (State.StateT [var] (Except.Except (ErrorIn ExampleJudgements var tag)) a)
-    deriving newtype (Functor, Applicative, Monad)
-
-exampleJudge :: Judge ExampleJ ExampleJudgements ExampleExtrinsic
+exampleJudge :: Judge ExampleJudgements ExampleExtrinsic
 exampleJudge = Judge {jExtrinsic = jExtrinsic}
     where
     jExtrinsic judge_ gen = go
@@ -309,7 +306,7 @@ apply fun arg = do
 -- Do we distinguish between vars and finites/extrinsic terms?
 
 
-data Judge j judgements extrinsic = Judge {
+data Judge judgements extrinsic = Judge {
         jExtrinsic :: forall var f . Monad f => (var -> judgements var -> f ()) -> f var -> extrinsic -> f var -- I need to let them unify created vars (with concrete types only?). Eg with this I can do TSet a, but not TSet Int
         -- jIsFun :: forall var . var -> var -> judgements var,
         -- jTopLevel :: forall var . judgements var -- Used for top level statements (i.e. the root expression, as well as the RHS of forall/exists/etc.)
@@ -317,7 +314,7 @@ data Judge j judgements extrinsic = Judge {
 
 
 -- TODO: Add a final unification step to concretize return type. Can use union-find
-typecheck :: forall var judgements tvar j m extrinsic . (Ord var, TypeSystem judgements, MonadTypecheck tvar var judgements m, Ord tvar, Enum tvar, (forall tag var' . Monad (j var' tag)), Functor (ErrorIn judgements var)) => Judge j judgements extrinsic -> Query extrinsic var -> m tvar
+typecheck :: forall var judgements tvar m extrinsic . (Ord var, TypeSystem judgements, MonadTypecheck tvar var judgements m, Ord tvar, Enum tvar, Functor (ErrorIn judgements var)) => Judge judgements extrinsic -> Query extrinsic var -> m tvar
 typecheck dredd query = do
         tlv <- go query
         judge tlv topLevel
