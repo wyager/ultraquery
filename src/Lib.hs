@@ -3,8 +3,8 @@ module Lib where
 
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
--- import qualified Data.Set as Set
--- import Data.Set (Set)
+import qualified Data.Set as Set
+import Data.Set (Set)
 import qualified Control.Monad.State as State
 import qualified Control.Monad.Except as Except
 import           Capability.Accessors (Field, Lift, Rename, Ctor)
@@ -17,19 +17,14 @@ import   Capability.Reader (HasReader)
 import GHC.Generics (Generic)
 import Control.Monad.Identity (runIdentity)
 import Control.Applicative ((<|>))
-import Control.Monad (when)
+import Control.Monad (when, unless)
 
 someFunc :: IO ()
 someFunc = putStrLn "someFunc"
 
 
 
-data Query ext var   
-    = Var var -- Constraint solver variables
-    | Extrinsic ext -- Constant terms, defined outside of the core language.
-    | Exists var (Query ext var)  -- Discharge a CSV
-    | Apply (Query ext var) (Query ext var) -- Think about generalizing to (Apply (Query ext var) [Query ext var]). Do we want to allow CSVs to have function types?
-    deriving (Show, Functor, Foldable, Traversable)
+
 
 data RenameState old new = RenameState {
         free :: Map old new, -- Free variables
@@ -173,28 +168,28 @@ data Type var
 
 -- We need to make this monadic. It should check that the structure of x and y are the same, while emitting 
 -- unifications of their variables.
-unifyType :: Monad m => (var -> var -> m var') -> tag -> Type var -> Type var -> m (Either (ExampleTypeError var tag) (Type var'))
-unifyType u t = go 
+unifyType :: Monad m => (var -> var -> m var') -> (forall a . ExampleTypeError var tag -> m a) -> tag -> Type var -> Type var -> m (Type var')
+unifyType u err t = go 
     where
-    go TInt TInt = return (Right TInt)
-    go TFloat TFloat = return (Right TFloat)
-    go TBool TBool = return (Right TBool)
-    go (TFun ix ox) (TFun iy oy) = Right <$> (TFun <$> u ix iy <*> u ox oy)
-    go (TSet a) (TSet b) = Right . TSet <$> u a b
-    go x y = return $ Left (UnificationFailure x y t)
+    go TInt TInt = return  TInt
+    go TFloat TFloat = return  TFloat
+    go TBool TBool = return  TBool
+    go (TFun ix ox) (TFun iy oy) = TFun <$> u ix iy <*> u ox oy
+    go (TSet a) (TSet b) = TSet <$> u a b
+    go x y = err (UnificationFailure x y t)
 
-applyType ::  Monad m => (var -> var -> m ()) -> tag -> Type var -> var -> m (Either (ExampleTypeError var tag) var)
-applyType unify tag t1 arg = case t1 of
+applyType ::  Monad m => (var -> var -> m ()) -> (forall a . ExampleTypeError var tag -> m a) -> tag -> Type var -> var -> m var
+applyType unify err tag t1 arg = case t1 of
     TFun i o -> do
         unify i arg-- Pretty sure constructing an EJ here is wrong. Maybe I need two separate functions, for unifying cardinality and type? Or just add back the Nothing constructor of [is]?
-        return $ Right o
-    _ -> return $ Left (NotFunction t1 tag)
+        return  o
+    _ -> err (NotFunction t1 tag)
 
 instance TypeSystem ExampleJudgements where
     type ErrorIn ExampleJudgements = ExampleTypeError
     topLevel = ExampleJudgements {finite = False, is = TBool}
-    unifyOne u tag (ExampleJudgements f1 i1) (ExampleJudgements f2 i2) = fmap (fmap (ExampleJudgements (f1 || f2))) $ unifyType u tag i1 i2
-    tApply judge_ tag (ExampleJudgements _f1 i1) i2 = applyType judge_ tag i1 i2 -- TODO: I need to figure out the correct way to propagate finitarity/membership info with apply. Will probably involve making a way to make finitarity judgements without also having an associated Type on hand?
+    unifyOne u _ignore err tag (ExampleJudgements f1 i1) (ExampleJudgements f2 i2) = (fmap (ExampleJudgements (f1 || f2))) $ unifyType u err tag i1 i2
+    tApply judge_ err tag (ExampleJudgements _f1 i1) i2 = applyType judge_ err tag i1 i2 -- TODO: I need to figure out the correct way to propagate finitarity/membership info with apply. Will probably involve making a way to make finitarity judgements without also having an associated Type on hand?
     tIsFun i o = ExampleJudgements False (TFun i o)
 
 data TCContext tvar var judgements = TCContext 
@@ -202,6 +197,8 @@ data TCContext tvar var judgements = TCContext
     , judgements :: Map tvar judgements
     , freshTV :: tvar
     } deriving (Generic, Show)
+
+
 
 
 
@@ -230,14 +227,7 @@ runTypecheckT (TypecheckT tc) = State.runStateT (Except.runExceptT tc)
 
 
 
-class Functor judgements => TypeSystem judgements where
-    type ErrorIn judgements :: * ->  * -> *
-    -- Unify a single level of judgements. E.g. if you have [Set a] and [Set b], unify the [Set]s but outsource unifying a,b via the first arg
-    unifyOne :: Monad m => (var -> var -> m var') -> tag -> judgements var -> judgements var -> m (Either (ErrorIn judgements var tag) (judgements var'))
-    topLevel :: judgements var
-    tApply :: Monad m => (var -> var -> m ()) -> tag -> judgements var -> var -> m (Either (ErrorIn judgements var tag) var)
-    tIsFun :: var -> var -> judgements var
-    -- applyT :: judgements var -> judgements var -> Either (ErrorIn
+
 
 
 judgeVar :: (TypeSystem judgements, MonadTypecheck tvar var judgements m, Ord tvar, Ord var, Enum tvar) => var -> m tvar
@@ -258,10 +248,9 @@ judge tvar newJudgements = do
     case judgements of
         Nothing -> CS.modify' @"judgements" (Map.insert tvar newJudgements)
         Just preexisting -> do
-            unified <- unifyOne unifyVar tvar preexisting newJudgements 
-            case unified of
-                Right consistent -> CS.modify' @"judgements" (Map.insert tvar consistent)
-                Left err -> CE.throw @"type" err
+            unified <- unifyOne unifyVar id (CE.throw @"type") tvar preexisting newJudgements 
+            CS.modify' @"judgements" (Map.insert tvar unified)
+                
     
 
 unifyVar :: forall tvar var judgements m . (TypeSystem judgements, MonadTypecheck tvar var judgements m, Ord tvar, Enum tvar) => tvar -> tvar -> m tvar
@@ -289,10 +278,8 @@ apply fun arg = do
     funJudgements <- (Map.lookup fun <$> CS.get @"judgements") >>= \case
         Nothing -> tIsFun <$> mkFresh <*> mkFresh
         Just j -> return j
-    result <- tApply (\a b -> () <$ unifyVar a b) fun funJudgements arg
-    case result of
-        Right resVar -> return resVar
-        Left err -> CE.throw @"type" err
+    tApply (\a b -> () <$ unifyVar a b) (CE.throw @"type") fun funJudgements arg
+
 
 
 
@@ -402,8 +389,94 @@ process query = (renamed, renameState, typeResult, context)
         return (topLevelTvar, annotated)
     (typeResult, context) = runIdentity $ runTypecheckT theCheck emptyTCContext
 
+class Functor judgements => TypeSystem judgements where
+    type ErrorIn judgements :: * ->  * -> *
+    -- Unify a single level of judgements. E.g. if you have [Set a] and [Set b], unify the [Set]s but outsource unifying a,b via the first arg
+    unifyOne :: Monad m => (var -> var -> m var') -> (var -> var') -> (forall a . ErrorIn judgements var tag -> m a) -> tag -> judgements var -> judgements var -> m (judgements var')
+    topLevel :: judgements var
+    tApply :: Monad m => (var -> var -> m ()) -> (forall a . ErrorIn judgements var tag -> m a) -> tag -> judgements var -> var -> m var
+    tIsFun :: var -> var -> judgements var
 
 
+data SJmnt set var 
+    = SJMulti [var]
+    | SJComp var 
+    | SJFinite set
+    deriving (Eq, Ord, Show, Functor, Foldable)
+
+
+data TJmnt var 
+    = TJInt 
+    | TJFloat
+    | TJFun var var  -- arg, ret
+    | TJSet var 
+    | TJBool
+    deriving (Eq, Ord, Show, Functor, Foldable)
+
+
+data Joverlay j1 j2 var = Joverlay (Maybe (j1 var)) (Maybe (j2 var))
+    deriving (Eq, Ord, Show, Functor, Foldable)
+
+data JoverlayError j1 j2 var tag = J1Error (ErrorIn j1 var tag) | J2Error (ErrorIn j2 var tag)
+
+instance (TypeSystem j1, TypeSystem j2) => TypeSystem (Joverlay j1 j2) where
+    type ErrorIn (Joverlay j1 j2) = JoverlayError j1 j2
+    unifyOne u ignore err tag (Joverlay j1l j2l) (Joverlay j1r j2r) = do
+        j1' <- case (j1l,j1r) of
+            (Just x, Just y) -> Just <$> unifyOne u ignore (err . J1Error) tag x y
+            (x,y) -> return (fmap (fmap ignore) (x <|> y))
+        j2' <- case (j2l, j2r) of
+            (Just x, Just y) -> Just <$> unifyOne u ignore (err . J2Error) tag x y
+            (x,y) -> return (fmap (fmap ignore) (x <|> y))
+        return (Joverlay j1' j2')
+    topLevel = Joverlay (Just topLevel) (Just topLevel)
+    -- tApply u err tag jmnt var
+
+
+data Γ tvar var judgements = Γ 
+    { direct_ :: Map var tvar
+    , judgements_ :: Map tvar (judgements tvar)
+    , dependencies :: Map tvar (Set tvar) -- Given a term that shows up the RHS of a judgmenet, give the LHS keys it shows up under
+    }
+
+γ0 :: Γ t v j
+γ0 = Γ Map.empty Map.empty Map.empty 
+
+unifying :: MonadΓ tvar jmnt m => tvar -> jmnt tvar -> Γ tvar var jmnt -> m (tvar, Γ tvar var jmnt)
+unifying tvar jmnt γ = return undefined
+
+type MonadΓ tvar judgements m =
+    (HasState "fresh" tvar m,
+     HasThrow "type" (ErrorIn judgements tvar tvar) m,
+     HasThrow "bug" (Bug tvar) m)
+
+isFinite :: judgements tvar -> Bool
+isFinite = undefined
+
+
+mkΓ :: (Enum tvar, Ord var, Ord tvar, MonadΓ tvar judgements m) => Query extrinsic var -> m (tvar, Γ tvar var judgements)
+mkΓ = go
+    where
+    go (Var var) = do
+        varTy <- mkFresh
+        let j = γ0 {direct_ = Map.singleton var varTy}
+        return (varTy, j)
+    go (Exists var q) = do
+        (tQ, γQ) <- go q
+        (tQ', γQ') <- unifying tQ (error "pass in a bool judgement") γQ
+        tV <- maybe (error "Existential var does not appear in RHS") return $ Map.lookup var (direct_ γQ') 
+        tJ <- maybe (error "Could not find finite judgements on var") return $ Map.lookup tV (judgements_ γQ')
+        unless (isFinite tJ) $ error "Could not prove that var is finite"
+        undefined
+
+
+
+data Query ext var   
+    = Var var -- Constraint solver variables
+    | Extrinsic ext -- Constant terms, defined outside of the core language.
+    | Exists var (Query ext var)  -- Discharge a CSV
+    | Apply (Query ext var) (Query ext var) -- Think about generalizing to (Apply (Query ext var) [Query ext var]). Do we want to allow CSVs to have function types?
+    deriving (Show, Functor, Foldable, Traversable)
 
 -- uniqify (
 
